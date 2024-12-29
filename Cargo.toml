@@ -1,0 +1,9 @@
+[package]
+name = "conutils"
+version = "0.1.0"
+edition = "2021"
+authors = ["hedon <171725713@qq.com>"]
+description = "A collection of utilities for concurrent programming in Rust."
+
+[dependencies]
+anyhow = "1.0.95"
