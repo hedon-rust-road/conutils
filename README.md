@@ -11,4 +11,4 @@ conutils is a collection of utilities for concurrent programming in Rust.
 
 ### SpinLock
 
-![SpinLock](./figures/spinlock.jpg)
+![SpinLock](./assets/figures/spinlock.jpg)
