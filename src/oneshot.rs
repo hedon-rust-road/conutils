@@ -1,15 +1,19 @@
 use std::{
     cell::UnsafeCell,
+    marker::PhantomData,
     mem::MaybeUninit,
     sync::atomic::{AtomicBool, Ordering},
+    thread::{self, Thread},
 };
 
 pub struct Sender<'a, T> {
     channel: &'a Channel<T>,
+    receiving_thread: Thread,
 }
 
 pub struct Receiver<'a, T> {
     channel: &'a Channel<T>,
+    _no_send: PhantomData<*const ()>,
 }
 
 pub struct Channel<T> {
@@ -29,7 +33,16 @@ impl<T> Channel<T> {
 
     pub fn split(&'_ mut self) -> (Sender<'_, T>, Receiver<'_, T>) {
         *self = Self::new();
-        (Sender { channel: self }, Receiver { channel: self })
+        (
+            Sender {
+                channel: self,
+                receiving_thread: thread::current(),
+            },
+            Receiver {
+                channel: self,
+                _no_send: PhantomData,
+            },
+        )
     }
 }
 
@@ -38,17 +51,14 @@ impl<T> Sender<'_, T> {
     pub fn send(self, message: T) {
         unsafe { (*self.channel.message.get()).write(message) };
         self.channel.ready.store(true, Ordering::Relaxed);
+        self.receiving_thread.unpark();
     }
 }
 
 impl<T> Receiver<'_, T> {
-    pub fn is_ready(&self) -> bool {
-        self.channel.ready.load(Ordering::Relaxed)
-    }
-
     pub fn receive(self) -> T {
         if !self.channel.ready.load(Ordering::Acquire) {
-            panic!("no message available!");
+            thread::park();
         }
         unsafe { (*self.channel.message.get()).assume_init_read() }
     }
@@ -81,7 +91,6 @@ mod tests {
         let mut channel = Channel::new();
         let (sender, receiver) = channel.split();
         sender.send(1);
-        assert!(receiver.is_ready());
         assert_eq!(receiver.receive(), 1);
     }
 
@@ -91,20 +100,10 @@ mod tests {
         let (sender, receiver) = channel.split();
         thread::scope(|s| {
             s.spawn(|| {
-                let load;
-                loop {
-                    if receiver.is_ready() {
-                        assert_eq!(receiver.receive(), 1);
-                        load = true;
-                        break;
-                    }
-                }
-                assert!(load);
-            });
-            s.spawn(|| {
                 thread::sleep(Duration::from_millis(10));
                 sender.send(1);
             });
         });
+        assert_eq!(receiver.receive(), 1);
     }
 }
