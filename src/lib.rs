@@ -1,7 +1,7 @@
-mod channel;
 mod mpsc;
+mod oneshot;
 mod spinlock;
 
-pub use channel::*;
 pub use mpsc::*;
+pub use oneshot::*;
 pub use spinlock::*;
