@@ -9,7 +9,7 @@ use std::{
 struct ArcData<T> {
     /// Number of `Arc`s.
     data_ref_count: AtomicUsize,
-    /// Number of `Arc`s and `Weak`s combined.
+    /// Number of `Weak`s, plus one if there are any `Arc`s.
     alloc_ref_count: AtomicUsize,
     /// The data. Dropped if there are only weak pointers left.
     data: UnsafeCell<ManuallyDrop<T>>,
@@ -119,7 +119,7 @@ impl<T> Drop for Arc<T> {
                 ManuallyDrop::drop(&mut *self.data().data.get());
             }
             // Now that there's no `Arc<T>`s left,
-            // drop the implicit week pointer that represented all `Arc<>T`s.
+            // drop the implicit week pointer that represented all `Arc<T>`s.
             drop(Weak { ptr: self.ptr });
         }
     }
@@ -210,5 +210,106 @@ mod tests {
         // weak pointer should no longer be upgradable.
         assert_eq!(NUM_DROPS.load(Ordering::Relaxed), 1);
         assert!(z.upgrade().is_none());
+    }
+
+    // Helper methods for testing reference counts
+    impl<T> Arc<T> {
+        fn get_data_ref_count(&self) -> usize {
+            self.data().data_ref_count.load(Ordering::Relaxed)
+        }
+
+        fn get_alloc_ref_count(&self) -> usize {
+            self.data().alloc_ref_count.load(Ordering::Relaxed)
+        }
+    }
+
+    #[test]
+    fn test_basic_arc() {
+        // Test creation and basic reference counting
+        let x = Arc::new(42);
+        assert_eq!(*x, 42);
+        assert_eq!(x.get_data_ref_count(), 1);
+        assert_eq!(x.get_alloc_ref_count(), 1);
+
+        // Test cloning
+        let y = Arc::clone(&x);
+        assert_eq!(*y, 42);
+        assert_eq!(x.get_data_ref_count(), 2);
+        assert_eq!(x.get_alloc_ref_count(), 1);
+
+        // Test dropping
+        drop(y);
+        assert_eq!(x.get_data_ref_count(), 1);
+        assert_eq!(x.get_alloc_ref_count(), 1);
+    }
+
+    #[test]
+    fn test_weak_reference() {
+        let strong = Arc::new(42);
+        assert_eq!(strong.get_data_ref_count(), 1);
+        assert_eq!(strong.get_alloc_ref_count(), 1);
+
+        let weak = Arc::downgrade(&strong);
+        assert_eq!(strong.get_data_ref_count(), 1); // strong count unchanged
+        assert_eq!(strong.get_alloc_ref_count(), 2); // alloc count increased
+
+        // Test upgrade succeeds while strong reference exists
+        let upgraded = weak.upgrade().unwrap();
+        assert_eq!(*upgraded, 42);
+        assert_eq!(strong.get_data_ref_count(), 2);
+        assert_eq!(strong.get_alloc_ref_count(), 2);
+
+        // Drop all strong references
+        drop(upgraded);
+        drop(strong);
+
+        // Weak upgrade should now fail
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn test_cyclic_reference() {
+        // TODO: test this case
+    }
+
+    #[test]
+    fn test_multiple_threads() {
+        use std::thread;
+
+        let arc = Arc::new(42);
+        let arc2 = Arc::clone(&arc);
+
+        let handle = thread::spawn(move || {
+            assert_eq!(*arc2, 42);
+            let weak = Arc::downgrade(&arc2);
+            assert_eq!(weak.upgrade().unwrap().get_data_ref_count(), 3);
+        });
+
+        assert_eq!(*arc, 42);
+        handle.join().unwrap();
+
+        assert_eq!(arc.get_data_ref_count(), 1);
+        assert_eq!(arc.get_alloc_ref_count(), 1);
+    }
+
+    #[test]
+    fn test_get_mut() {
+        let mut x = Arc::new(42);
+
+        // Should be able to get mutable reference when unique
+        let value = Arc::get_mut(&mut x).unwrap();
+        *value = 43;
+        let _ = value;
+        assert_eq!(*x, 43);
+
+        // Not other reference, get_mut should still succeed
+        let value = Arc::get_mut(&mut x).unwrap();
+        *value = 44;
+        assert_eq!(*x, 44);
+
+        // If has weak, get_mut should fail
+        let weak = Arc::downgrade(&x);
+        assert!(Arc::get_mut(&mut x).is_none());
+        let _ = weak;
     }
 }
