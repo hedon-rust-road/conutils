@@ -8,7 +8,8 @@ use atomic_wait::{wait, wake_one};
 
 pub struct Mutex<T> {
     /// 0: unlocked
-    /// 1: locked
+    /// 1: locked, no other threads waiting
+    /// 2: unlocked, other threads waiting
     state: AtomicU32,
     value: UnsafeCell<T>,
 }
@@ -27,11 +28,15 @@ impl<T> Mutex<T> {
 
     pub fn lock(&self) -> MutexGuard<T> {
         // Set the state to 1: locked.
-        while self.state.swap(1, Ordering::Acquire) == 1 {
-            // If it was already locked.
-            // .. wait, unless the state is no longer 1.
-            // .. and, try again to swap.
-            wait(&self.state, 1);
+        if self
+            .state
+            .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            // Mark that there are threads waiting for the lock.
+            while self.state.swap(2, Ordering::Acquire) != 0 {
+                wait(&self.state, 2);
+            }
         }
         // Swap successfully, means locked.
         MutexGuard { mutex: self }
@@ -55,15 +60,9 @@ impl<T> DerefMut for MutexGuard<'_, T> {
 
 impl<T> Drop for MutexGuard<'_, T> {
     fn drop(&mut self) {
-        // Set the state back to 0: unlocked.
-        self.mutex.state.store(0, Ordering::Release);
-        // Wake up one of the waiting threads, if any.
-        //
-        // Waking one thread is enough, because even if
-        // there are multiple threads waiting, only one
-        // of them will be able to claim the lock.
-        // The next thread to lock it will wake up another
-        // thread when it's done with the lock, and so on.
-        wake_one(&self.mutex.state);
+        // If there are threads waiting for the lock, wait one of them.
+        if self.mutex.state.swap(0, Ordering::Release) == 2 {
+            wake_one(&self.mutex.state);
+        }
     }
 }
