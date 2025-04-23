@@ -33,13 +33,30 @@ impl<T> Mutex<T> {
             .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
         {
-            // Mark that there are threads waiting for the lock.
-            while self.state.swap(2, Ordering::Acquire) != 0 {
-                wait(&self.state, 2);
-            }
+            // The lock was already locked. :(
+            lock_contented(&self.state)
         }
         // Swap successfully, means locked.
         MutexGuard { mutex: self }
+    }
+}
+
+fn lock_contented(state: &AtomicU32) {
+    let mut spin_count = 0;
+    while state.load(Ordering::Relaxed) == 1 && spin_count < 100 {
+        spin_count += 1;
+        std::hint::spin_loop();
+    }
+
+    if state
+        .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
+        .is_ok()
+    {
+        return;
+    }
+
+    while state.swap(2, Ordering::Acquire) != 0 {
+        wait(state, 2);
     }
 }
 
@@ -64,5 +81,24 @@ impl<T> Drop for MutexGuard<'_, T> {
         if self.mutex.state.swap(0, Ordering::Release) == 2 {
             wake_one(&self.mutex.state);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::thread;
+
+    use super::*;
+
+    #[test]
+    fn mutex_should_work() {
+        let m = Mutex::new(0);
+        thread::scope(|s| {
+            s.spawn(|| {
+                *m.lock() += 1;
+            });
+        });
+        let v = *m.lock();
+        assert_eq!(v, 1)
     }
 }
