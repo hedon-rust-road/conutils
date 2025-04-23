@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use atomic_wait::{wait, wake_all, wake_one};
 
@@ -6,26 +6,33 @@ use crate::MutexGuard;
 
 pub struct Condvar {
     counter: AtomicU32,
+    num_waiters: AtomicUsize,
 }
 
 impl Condvar {
     pub const fn new() -> Self {
         Self {
             counter: AtomicU32::new(0),
+            num_waiters: AtomicUsize::new(0),
         }
     }
 
     pub fn notify_one(&self) {
-        self.counter.fetch_add(1, Ordering::Relaxed);
-        wake_one(&self.counter);
+        if self.num_waiters.load(Ordering::Relaxed) > 0 {
+            self.counter.fetch_add(1, Ordering::Relaxed);
+            wake_one(&self.counter);
+        }
     }
 
     pub fn notify_all(&self) {
-        self.counter.fetch_add(1, Ordering::Relaxed);
-        wake_all(&self.counter);
+        if self.num_waiters.load(Ordering::Relaxed) > 0 {
+            self.counter.fetch_add(1, Ordering::Relaxed);
+            wake_all(&self.counter);
+        }
     }
 
     pub fn wait<'a, T>(&self, guard: MutexGuard<'a, T>) -> MutexGuard<'a, T> {
+        self.num_waiters.fetch_add(1, Ordering::Relaxed);
         let counter_value = self.counter.load(Ordering::Relaxed);
 
         // Unlock the mutex by dropping the guard,
@@ -35,6 +42,8 @@ impl Condvar {
 
         // Wait, but only if the counter hasn't changed since unlocking.
         wait(&self.counter, counter_value);
+
+        self.num_waiters.fetch_sub(1, Ordering::Relaxed);
 
         // If the condition matches, lock the mutex and do biz logic.
         mutex.lock()
