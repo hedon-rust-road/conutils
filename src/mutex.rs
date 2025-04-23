@@ -15,7 +15,7 @@ pub struct Mutex<T> {
 }
 
 pub struct MutexGuard<'a, T> {
-    mutex: &'a Mutex<T>,
+    pub(crate) mutex: &'a Mutex<T>,
 }
 
 impl<T> Mutex<T> {
