@@ -7,3 +7,4 @@ description = "A collection of utilities for concurrent programming in Rust."
 
 [dependencies]
 anyhow = "1.0.95"
+atomic-wait = "1.1.0"
