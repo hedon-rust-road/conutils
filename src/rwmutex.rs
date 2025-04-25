@@ -6,26 +6,29 @@ use std::{
 
 use atomic_wait::{wait, wake_all, wake_one};
 
-pub struct RWMutex<T> {
+pub struct RwMutex<T> {
     /// The number of readers, or u32::MAX if write-locked.
     state: AtomicU32,
+    /// Incremented to wake up writers.
+    write_wake_counter: AtomicU32,
     value: UnsafeCell<T>,
 }
 
 pub struct ReadGuard<'a, T> {
-    rwmutex: &'a RWMutex<T>,
+    rwmutex: &'a RwMutex<T>,
 }
 
 pub struct WriteGuard<'a, T> {
-    rwmutx: &'a RWMutex<T>,
+    rwmutx: &'a RwMutex<T>,
 }
 
-unsafe impl<T> Sync for RWMutex<T> where T: Send + Sync {}
+unsafe impl<T> Sync for RwMutex<T> where T: Send + Sync {}
 
-impl<T> RWMutex<T> {
+impl<T> RwMutex<T> {
     pub const fn new(value: T) -> Self {
         Self {
             state: AtomicU32::new(0),
+            write_wake_counter: AtomicU32::new(0),
             value: UnsafeCell::new(value),
         }
     }
@@ -57,6 +60,12 @@ impl<T> RWMutex<T> {
             self.state
                 .compare_exchange(0, u32::MAX, Ordering::Acquire, Ordering::Relaxed)
         {
+            let w = self.write_wake_counter.load(Ordering::Acquire);
+            if self.state.load(Ordering::Relaxed) != 0 {
+                // Wait if the RwMutex is still locked, but only i
+                // there have been no wake signals since we checked.
+                wait(&self.write_wake_counter, w);
+            }
             wait(&self.state, s);
         }
         WriteGuard { rwmutx: self }
@@ -86,8 +95,10 @@ impl<T> DerefMut for WriteGuard<'_, T> {
 impl<T> Drop for ReadGuard<'_, T> {
     fn drop(&mut self) {
         if self.rwmutex.state.fetch_sub(1, Ordering::Release) == 1 {
-            // Wake up a waiting writer, if any.
-            wake_one(&self.rwmutex.state);
+            self.rwmutex
+                .write_wake_counter
+                .fetch_add(1, Ordering::Release);
+            wake_one(&self.rwmutex.write_wake_counter);
         }
     }
 }
@@ -95,7 +106,12 @@ impl<T> Drop for ReadGuard<'_, T> {
 impl<T> Drop for WriteGuard<'_, T> {
     fn drop(&mut self) {
         self.rwmutx.state.store(0, Ordering::Release);
-        // Wake up all waiting readers and writers.
+        self.rwmutx
+            .write_wake_counter
+            .fetch_sub(1, Ordering::Release);
+        // Wake up one waiting writer.
+        wake_one(&self.rwmutx.write_wake_counter);
+        // Wake up all waiting readers.
         wake_all(&self.rwmutx.state);
     }
 }
@@ -106,7 +122,7 @@ mod tests {
 
     #[test]
     fn remutex_should_work() {
-        let rw = RWMutex::new(0);
+        let rw = RwMutex::new(0);
         {
             let rg = rw.read();
             assert_eq!(*rg, 0);

@@ -10,6 +10,7 @@ conutils is a collection of utilities for concurrent programming in Rust.
 - [x] [arc](./src/arc.rs): Arc implementation.
 - [x] [mutex](./src/mutex.rs): Mutex implementation.
 - [x] [condvar](./src/condvar.rs): Condition variable implementation.
+- [x] [rwmutex](./src/rwmutex.rs): Read-Write Mutex implementation.
 
 ## Figures
 
