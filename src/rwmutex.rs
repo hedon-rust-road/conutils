@@ -7,7 +7,11 @@ use std::{
 use atomic_wait::{wait, wake_all, wake_one};
 
 pub struct RwMutex<T> {
-    /// The number of readers, or u32::MAX if write-locked.
+    /// The number of read locks times two, plus one if there's a writer waiting.
+    /// u32::MAX if write locked.
+    ///
+    /// This means that readers may acquire the lock when
+    /// the state is even, but need to block when odd.
     state: AtomicU32,
     /// Incremented to wake up writers.
     write_wake_counter: AtomicU32,
@@ -37,38 +41,62 @@ impl<T> RwMutex<T> {
         let mut s = self.state.load(Ordering::Relaxed);
         loop {
             // unlocked or read locked
-            if s < u32::MAX {
-                assert!(s != u32::MAX - 1, "too many readers");
+            if s % 2 == 0 {
+                // Even
+                assert!(s != u32::MAX - 2, "too many readers");
                 match self
                     .state
-                    .compare_exchange(s, s + 1, Ordering::Acquire, Ordering::Relaxed)
+                    .compare_exchange(s, s + 2, Ordering::Acquire, Ordering::Relaxed)
                 {
                     Ok(_) => return ReadGuard { rwmutex: self },
                     Err(e) => s = e,
                 }
             }
             // write locked
-            if s == u32::MAX {
-                wait(&self.state, u32::MAX);
+            if s % 2 == 1 {
+                wait(&self.state, s);
                 s = self.state.load(Ordering::Relaxed);
             }
         }
     }
 
     pub fn write(&self) -> WriteGuard<T> {
-        while let Err(s) =
-            self.state
-                .compare_exchange(0, u32::MAX, Ordering::Acquire, Ordering::Relaxed)
-        {
-            let w = self.write_wake_counter.load(Ordering::Acquire);
-            if self.state.load(Ordering::Relaxed) != 0 {
-                // Wait if the RwMutex is still locked, but only i
-                // there have been no wake signals since we checked.
-                wait(&self.write_wake_counter, w);
+        let mut s = self.state.load(Ordering::Relaxed);
+        loop {
+            // Try to lock if unlocked
+            if s <= 1 {
+                match self
+                    .state
+                    .compare_exchange(s, u32::MAX, Ordering::Acquire, Ordering::Relaxed)
+                {
+                    Ok(_) => return WriteGuard { rwmutx: self },
+                    Err(e) => {
+                        s = e;
+                        continue;
+                    }
+                }
             }
-            wait(&self.state, s);
+            // Block new readers, by marking sure the state is odd.
+            if s % 2 == 0 {
+                match self
+                    .state
+                    .compare_exchange(s, s + 1, Ordering::Relaxed, Ordering::Relaxed)
+                {
+                    Ok(_) => {}
+                    Err(e) => {
+                        s = e;
+                        continue;
+                    }
+                }
+            }
+            // Wait, if it still locked
+            let w = self.write_wake_counter.load(Ordering::Acquire);
+            s = self.state.load(Ordering::Relaxed);
+            if s >= 2 {
+                wait(&self.write_wake_counter, w);
+                s = self.state.load(Ordering::Relaxed);
+            }
         }
-        WriteGuard { rwmutx: self }
     }
 }
 
@@ -94,7 +122,11 @@ impl<T> DerefMut for WriteGuard<'_, T> {
 
 impl<T> Drop for ReadGuard<'_, T> {
     fn drop(&mut self) {
-        if self.rwmutex.state.fetch_sub(1, Ordering::Release) == 1 {
+        // Decrement the state by 2 to remove one read-lock.
+        if self.rwmutex.state.fetch_sub(2, Ordering::Release) == 3 {
+            // If we decremented from 3 to 1, that means
+            // the RwMutex is now unlocked and there is
+            // a waiting write, which we wake up.
             self.rwmutex
                 .write_wake_counter
                 .fetch_add(1, Ordering::Release);
