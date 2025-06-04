@@ -63,16 +63,18 @@ impl<T> Arc<T> {
         unsafe { Some(&mut *arc.data().data.get()) }
     }
 
-    pub fn downgrade(arc: &Self) -> Weak<T> {
-        let mut n = arc.data().alloc_ref_count.load(Ordering::Relaxed);
+    pub fn downgrade(&self) -> Weak<T> {
+        let mut n = self.data().alloc_ref_count.load(Ordering::Relaxed);
         loop {
             if n == usize::MAX {
                 std::hint::spin_loop();
-                n = arc.data().alloc_ref_count.load(Ordering::Relaxed);
+                n = self.data().alloc_ref_count.load(Ordering::Relaxed);
                 continue;
             }
             assert!(n < usize::MAX - 1);
-            if let Err(e) = arc.data().alloc_ref_count.compare_exchange_weak(
+
+            // Acquire sets happens-before with `get_mut` release-store.
+            if let Err(e) = self.data().alloc_ref_count.compare_exchange_weak(
                 n,
                 n + 1,
                 Ordering::Acquire,
@@ -81,7 +83,7 @@ impl<T> Arc<T> {
                 n = e;
                 continue;
             }
-            return Weak { ptr: arc.ptr };
+            return Weak { ptr: self.ptr };
         }
     }
 
@@ -173,6 +175,8 @@ impl<T> Drop for Weak<T> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+
     use super::*;
 
     #[test]
@@ -268,11 +272,6 @@ mod tests {
     }
 
     #[test]
-    fn test_cyclic_reference() {
-        // TODO: test this case
-    }
-
-    #[test]
     fn test_multiple_threads() {
         use std::thread;
 
@@ -311,5 +310,77 @@ mod tests {
         let weak = Arc::downgrade(&x);
         assert!(Arc::get_mut(&mut x).is_none());
         let _ = weak;
+    }
+
+    #[test]
+    fn cycle_reference_no_weak_should_not_free_resource() {
+        static NUM_DROPS: AtomicUsize = AtomicUsize::new(0);
+        struct Node {
+            child: RefCell<Vec<Arc<Node>>>,
+            parent: RefCell<Option<Arc<Node>>>,
+        }
+        impl Drop for Node {
+            fn drop(&mut self) {
+                NUM_DROPS.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        impl Node {
+            pub fn new() -> Self {
+                Self {
+                    child: RefCell::new(vec![]),
+                    parent: RefCell::new(None),
+                }
+            }
+            pub fn add_child(parent: &Arc<Node>, child: Arc<Node>) {
+                *child.parent.borrow_mut() = Some(parent.clone());
+                parent.child.borrow_mut().push(child);
+            }
+        }
+        {
+            let root = Arc::new(Node::new());
+            let child1 = Arc::new(Node::new());
+            let child2 = Arc::new(Node::new());
+            Node::add_child(&root, child1);
+            Node::add_child(&root, child2);
+        }
+
+        // not equal to 3, means the root/child1/child3 haven't been dropped.
+        assert_ne!(NUM_DROPS.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn cycle_reference_use_weak_should_free_resource() {
+        static NUM_DROPS: AtomicUsize = AtomicUsize::new(0);
+        struct Node {
+            child: RefCell<Vec<Arc<Node>>>,
+            parent: RefCell<Option<Weak<Node>>>,
+        }
+        impl Drop for Node {
+            fn drop(&mut self) {
+                NUM_DROPS.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        impl Node {
+            pub fn new() -> Self {
+                Self {
+                    child: RefCell::new(vec![]),
+                    parent: RefCell::new(None),
+                }
+            }
+            pub fn add_child(parent: &Arc<Node>, child: Arc<Node>) {
+                *child.parent.borrow_mut() = Some(parent.downgrade());
+                parent.child.borrow_mut().push(child);
+            }
+        }
+        {
+            let root = Arc::new(Node::new());
+            let child1 = Arc::new(Node::new());
+            let child2 = Arc::new(Node::new());
+            Node::add_child(&root, child1);
+            Node::add_child(&root, child2);
+        }
+
+        // equal to 3, means the root/child1/child3 have been dropped.
+        assert_eq!(NUM_DROPS.load(Ordering::Relaxed), 3);
     }
 }
