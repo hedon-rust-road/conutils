@@ -27,36 +27,24 @@ impl<T> Mutex<T> {
     }
 
     pub fn lock(&self) -> MutexGuard<T> {
-        // Set the state to 1: locked.
-        if self
-            .state
-            .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
-        {
-            // The lock was already locked. :(
-            lock_contented(&self.state)
-        }
+        lock_contended(&self.state);
         // Swap successfully, means locked.
         MutexGuard { mutex: self }
     }
 }
 
-fn lock_contented(state: &AtomicU32) {
+fn lock_contended(state: &AtomicU32) {
     let mut spin_count = 0;
-    while state.load(Ordering::Relaxed) == 1 && spin_count < 100 {
-        spin_count += 1;
-        std::hint::spin_loop();
-    }
-
-    if state
-        .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
-        .is_ok()
-    {
-        return;
-    }
-
-    while state.swap(2, Ordering::Acquire) != 0 {
-        wait(state, 2);
+    while let Err(s) = state.compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed) {
+        if s == 1 {
+            if spin_count < 100 {
+                spin_count += 1;
+                std::hint::spin_loop();
+                continue;
+            }
+            _ = state.compare_exchange(1, 2, Ordering::Acquire, Ordering::Relaxed);
+        }
+        wait(state, 2)
     }
 }
 
@@ -86,19 +74,62 @@ impl<T> Drop for MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use std::thread;
+    use std::{
+        thread::{self, sleep},
+        time::Duration,
+    };
 
     use super::*;
 
     #[test]
-    fn mutex_should_work() {
-        let m = Mutex::new(0);
+    fn one_thread_should_work() {
+        let l = Mutex::new(vec![]);
+        let mut guard = l.lock();
+        guard.push(1);
+        drop(guard);
+
+        let guard = l.lock();
+        assert_eq!(guard[0], 1);
+    }
+
+    #[test]
+    fn cross_thread_should_work() {
+        let l = Mutex::new(vec![]);
+
         thread::scope(|s| {
             s.spawn(|| {
-                *m.lock() += 1;
+                let mut guard = l.lock();
+                guard.push(1);
+                sleep(Duration::from_millis(100)); // sleep for making the second thread to be blcoked.
+            });
+
+            sleep(Duration::from_millis(10)); // make sure the first thread get the lock
+            s.spawn(|| {
+                let mut guard = l.lock();
+                guard.push(2);
             });
         });
-        let v = *m.lock();
-        assert_eq!(v, 1)
+
+        let guard = l.lock();
+        assert_eq!(guard.len(), 2);
+    }
+
+    #[test]
+    fn high_concurrency_test() {
+        let l = Mutex::new(0);
+
+        std::thread::scope(|s| {
+            for _ in 0..10 {
+                s.spawn(|| {
+                    for _ in 0..1000 {
+                        let mut guard = l.lock();
+                        *guard += 1;
+                    }
+                });
+            }
+        });
+
+        let guard = l.lock();
+        assert_eq!(*guard, 10 * 1000);
     }
 }
