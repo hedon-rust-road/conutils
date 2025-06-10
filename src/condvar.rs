@@ -58,7 +58,7 @@ impl Default for Condvar {
 
 #[cfg(test)]
 mod tests {
-    use std::{thread, time::Duration};
+    use std::{collections::VecDeque, thread, time::Duration};
 
     use crate::Mutex;
 
@@ -90,5 +90,35 @@ mod tests {
         // Check that the main thread actually did wait(not busy-loop),
         // while still allowing for a few spurious wake ups.
         assert!(0 < wakeups && wakeups < 10);
+    }
+
+    #[test]
+    fn condvar_usage() {
+        let queue = Mutex::new(VecDeque::new());
+        let not_empty = Condvar::new();
+
+        thread::scope(|s| {
+            s.spawn(|| loop {
+                let mut q = queue.lock();
+                let item = loop {
+                    if let Some(item) = q.pop_front() {
+                        break item;
+                    } else {
+                        q = not_empty.wait(q);
+                    }
+                };
+                drop(q);
+                dbg!(item);
+                if item == 9 {
+                    return;
+                }
+            });
+
+            for i in 0..10 {
+                queue.lock().push_back(i);
+                not_empty.notify_one();
+                thread::sleep(Duration::from_millis(10));
+            }
+        });
     }
 }
