@@ -6,7 +6,7 @@ use std::{
 
 use atomic_wait::{wait, wake_all, wake_one};
 
-pub struct RwMutex<T> {
+pub struct RwLock<T> {
     /// The number of read locks times two, plus one if there's a writer waiting.
     /// u32::MAX if write locked.
     ///
@@ -19,16 +19,16 @@ pub struct RwMutex<T> {
 }
 
 pub struct ReadGuard<'a, T> {
-    rwmutex: &'a RwMutex<T>,
+    rwmutex: &'a RwLock<T>,
 }
 
 pub struct WriteGuard<'a, T> {
-    rwmutx: &'a RwMutex<T>,
+    rwmutx: &'a RwLock<T>,
 }
 
-unsafe impl<T> Sync for RwMutex<T> where T: Send + Sync {}
+unsafe impl<T> Sync for RwLock<T> where T: Send + Sync {}
 
-impl<T> RwMutex<T> {
+impl<T> RwLock<T> {
     pub const fn new(value: T) -> Self {
         Self {
             state: AtomicU32::new(0),
@@ -150,11 +150,95 @@ impl<T> Drop for WriteGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        thread::{self, sleep},
+        time::Duration,
+    };
+
     use super::*;
 
     #[test]
+    fn one_thread_should_work() {
+        let rwl = RwLock::new(vec![1, 2, 3]);
+
+        let r1 = rwl.read();
+        assert_eq!(r1.len(), 3);
+
+        let r2 = rwl.read();
+        assert_eq!(r2.len(), 3);
+
+        drop(r1);
+        drop(r2);
+
+        let mut w = rwl.write();
+        w.push(4);
+        drop(w);
+
+        let r3 = rwl.read();
+        assert_eq!(r3.len(), 4);
+    }
+
+    #[test]
+    fn cross_thread_should_work() {
+        let rwl = RwLock::new(vec![]);
+
+        thread::scope(|s| {
+            s.spawn(|| {
+                let mut w = rwl.write();
+                w.push(1);
+                w.push(2);
+            });
+
+            s.spawn(|| {
+                sleep(Duration::from_millis(100));
+                let r1 = rwl.read();
+                println!("{:?}", *r1);
+                let r2 = rwl.read();
+                println!("{:?}", *r2);
+                sleep(Duration::from_secs(1)); // stay locked to block after writers and readers
+            });
+        })
+    }
+
+    #[test]
+    fn writer_starvation_should_resolved() {
+        for _ in 0..10 {
+            let rwl = RwLock::new(vec![]);
+
+            thread::scope(|s| {
+                s.spawn(|| {
+                    let mut w = rwl.write();
+                    w.push(1);
+                    w.push(2);
+                });
+
+                s.spawn(|| {
+                    sleep(Duration::from_millis(10));
+                    let r1 = rwl.read();
+                    println!("{:?}", *r1);
+                    let r2 = rwl.read();
+                    println!("{:?}", *r2);
+                    sleep(Duration::from_millis(50)); // stay locked to block after writers and readers
+                });
+
+                s.spawn(|| {
+                    sleep(Duration::from_millis(20));
+                    let mut w2 = rwl.write();
+                    w2.push(3);
+                });
+
+                s.spawn(|| {
+                    sleep(Duration::from_millis(30));
+                    let r = rwl.read();
+                    assert_eq!(r.len(), 3); // must get lock after w2
+                });
+            })
+        }
+    }
+
+    #[test]
     fn remutex_should_work() {
-        let rw = RwMutex::new(0);
+        let rw = RwLock::new(0);
         {
             let rg = rw.read();
             assert_eq!(*rg, 0);
